@@ -1,0 +1,77 @@
+# Manual, optional, and it costs money: runs `adk eval` against a real model
+# and a Gemini judge with the repository's secrets. Never runs on push.
+# It has not been run yet. See docs/live-runs.md.
+name: eval-live
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: "WMS_MODEL_BACKEND"
+        type: choice
+        options: [gemini, litellm]
+        default: gemini
+      model:
+        description: "WMS_MODEL (empty = ADK's default Gemini model; provider/model for litellm)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-live
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/mcp-logistica
+          ref: 6e9763d7ab50e01567ada3b27f772b32cef1328f
+          path: .deps/mcp-logistica
+          token: ${{ secrets.MCP_LOGISTICA_TOKEN || github.token }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -c constraints.txt -e .deps/mcp-logistica
+          python -m pip install -c constraints.txt -e ".[dev]"
+
+      - name: Seed the synthetic database
+        run: wms-seed --db data/wms.sqlite --force
+
+      - name: adk eval (paid model calls)
+        env:
+          WMS_MODEL_BACKEND: ${{ inputs.backend }}
+          WMS_MODEL: ${{ inputs.model }}
+          WMS_WRITE_POLICY: "off"
+          WMS_DB_PATH: ${{ github.workspace }}/data/wms.sqlite
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -o pipefail
+          mkdir -p eval_results
+          adk eval agents/wms_assistant evals/wms_assistant.test.json \
+            --config_file_path evals/test_config.json --print_detailed_results \
+            2>&1 | tee eval_results/adk-eval.log
+
+      - name: Upload the log and ADK's eval history
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: eval-live-${{ github.run_id }}
+          path: |
+            eval_results/
+            agents/wms_assistant/.adk/eval_history/
+          if-no-files-found: warn

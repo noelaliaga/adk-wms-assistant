@@ -1,0 +1,16 @@
+# Versions of the direct dependencies the test suite ran against (2026-09-16,
+# Python 3.11-3.14). `make install` and CI install with `-c constraints.txt`,
+# so a fresh install reproduces them. Transitive dependencies still resolve
+# freely within the ranges these packages declare.
+# To test newer versions: edit these lines, `make install`, `make check`.
+google-adk==2.9.1
+google-genai==2.23.0
+mcp==1.30.0
+# litellm 1.85.7 publishes no build for Python 3.14; 3.14 was tested with 1.96.2.
+litellm==1.85.7; python_version < "3.14"
+litellm==1.96.2; python_version >= "3.14"
+pydantic==2.13.5
+ruff==0.16.8
+mypy==2.3.1
+pytest==9.1.1
+pytest-asyncio==1.4.0

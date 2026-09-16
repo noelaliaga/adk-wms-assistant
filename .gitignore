@@ -28,3 +28,4 @@ logs/
 .DS_Store
 # deployment staging (see docs/deploy-vertex-agent-engine.md)
 deploy/
+agents/wms_assistant/requirements.txt
