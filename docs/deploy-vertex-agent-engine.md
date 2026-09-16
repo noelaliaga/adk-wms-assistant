@@ -48,8 +48,8 @@ Four things need care for this agent.
 1. **Dependencies.** If the agent folder has no `requirements.txt`, the command
    writes one with only `google-adk`. This agent also needs `mcp` pinned to the
    version `mcp-logistica` was tested with. Create
-   `agents/wms_assistant/requirements.txt` for the deployment (it is not
-   committed):
+   `agents/wms_assistant/requirements.txt` for the deployment (it is listed in
+   `.gitignore`, so it stays out of the repository):
 
    ```text
    google-adk[mcp]==2.9.1
@@ -84,8 +84,9 @@ Four things need care for this agent.
 
 ## Environment variables
 
-`adk deploy agent_engine` reads `agents/wms_assistant/.env` (or
-`--env_file`) and passes its values to the deployed agent.
+`adk deploy agent_engine` reads `agents/wms_assistant/.env` and passes its
+values to the deployed agent. (`--env_file` and `--requirements_file` still
+exist in 2.9.1 but `--help` marks them deprecated; do not rely on them.)
 `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` from that file are used as
 `--project` and `--region` when those flags are absent.
 
@@ -177,23 +178,9 @@ Check the current Vertex AI pricing page for the actual rates.
 
 ## Design note: an AWS alternative for writes
 
-This is a design note only. Nothing on AWS was built or tested.
-
-The approval flow in this repository runs writes synchronously inside the
-agent's turn. On a serverless AWS stack, the same guarantees could be kept
-while making writes asynchronous and auditable:
-
-1. The agent's write tool does not call the WMS. It validates the request
-   (order id, allowed status, reason) and puts a message on an **SQS** queue
-   with an idempotency key, the approving user and the agent session id.
-2. A **Lambda** consumer takes the message and writes to the WMS with its own
-   narrowly-scoped role. It records the outcome in an audit table (for
-   example **DynamoDB**, keyed by order id and time). A dead-letter queue
-   catches writes the WMS rejects.
-3. The agent (or the user) reads the outcome back through a read tool, so it
-   never reports a write as done before it has been applied.
-
-What this adds: retries without duplicate writes, a write path the agent
-credentials cannot use directly, and back-pressure when the WMS is slow. What
-it costs: eventual consistency, meaning the agent must say "queued", not
-"done", and more moving parts to monitor.
+Not built, not tested; a direction only. On AWS, a write tool would validate
+the request and put it on an **SQS** queue with an idempotency key and the
+approving user; a **Lambda** consumer with its own narrow role would apply it
+and record the outcome in **DynamoDB**, which would also hold pending
+approvals and session state. The agent would then report "queued", not
+"done", until a read tool shows the result.

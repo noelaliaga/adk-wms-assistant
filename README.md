@@ -2,43 +2,69 @@
 
 A small warehouse assistant built with the
 [Google Agent Development Kit](https://google.github.io/adk-docs/) (`google-adk`).
-It does not define its own tools. It uses the tools of
-[`mcp-logistica`](https://github.com/noelaliaga/mcp-logistica), an MCP server over a
-warehouse management system (WMS), through ADK's `McpToolset` over stdio.
-<!-- TODO(Noel): check both GitHub URLs (mcp-logistica, wms-agent-evals) once the repos are public. -->
+It has no tools of its own. It uses the tools of
+[`mcp-logistica`](https://github.com/noelaliaga/mcp-logistica), an MCP server
+for a warehouse management system (WMS), through ADK's `McpToolset` over stdio.
 
-- **Ask before assuming.** The system instruction tells the model to ask
-  instead of picking: which order, which SKU, which status. The server enforces
-  the same rule: a name never selects an order to write.
-- **Writes are off by default.** With `WMS_WRITE_POLICY=off` the model does not
-  even see the write tools, and the server it talks to rejects writes anyway.
-  With `dry_run` or `on`, **every write call waits for human approval**
-  (ADK tool confirmation) before it reaches the server.
+- **Ask before assuming.** The instruction tells the model to ask which
+  order, SKU or status the user means instead of picking one. The server
+  enforces the same rule: a name is never enough to choose which order to
+  write to.
+- **Writes are off by default.** With writes on, **every write waits for a
+  person to approve it**, and the approval prompt shows the exact call.
 - **Gemini by default, Claude or OpenAI through LiteLLM**, chosen with an
   environment variable.
+- **Structured telemetry** for every tool call and model response, tagged
+  with the instruction version.
 
-Python 3.11+, `google-adk` 2.9, the official `mcp` SDK, `mypy --strict`, `ruff`,
-`pytest` and GitHub Actions. All data is synthetic.
+Python 3.11–3.14, `google-adk` 2.9, the official `mcp` SDK, `mypy --strict`,
+`ruff`, `pytest`, GitHub Actions. All data is synthetic.
 
-**Honest status in one line:** tested offline with a scripted model against
-the real MCP server. **Not deployed**, and **not run against a real model** in
-this repository. Details in [Status](#status).
+> **Honest status:** tested offline with a scripted model against the real
+> MCP server (52 tests). **Not run against a real model yet, and not
+> deployed.** See [Status](#status).
 
----
+## Try it in 60 seconds (no API keys)
+
+```bash
+git clone https://github.com/noelaliaga/mcp-logistica ../mcp-logistica   # needs access while that repo is private
+make install        # python3 >= 3.11; or PYTHON=python3.12, or PYTHON="$(uv python find 3.12)"
+make seed           # data/wms.sqlite with synthetic orders and stock
+make test           # 52 tests: scripted model, real MCP server, no network
+make eval-offline   # ADK's evaluator on the eval set with a replayed agent
+```
+
+`make eval-offline` checks that the eval files, tool names and metrics work
+with ADK. It **does not measure model quality**. After the results it prints
+a `ConnectionError: MCP session connection lost` traceback. That is expected
+with ADK 2.9.1 (see [testing notes](docs/testing-notes.md)).
+
+**Where to read the code first:**
+
+1. [`test_a_write_waits_for_user_approval`](tests/test_agent_turns.py): the
+   write pauses, nothing changes, and the approval prompt names the order,
+   status and reason.
+2. [`test_the_server_still_refuses_a_forbidden_status_after_approval`](tests/test_agent_turns.py):
+   the user approves marking an order `shipped`, and the server still refuses.
+3. [`test_adk_evaluator_fails_an_agent_that_guesses`](tests/test_evalset.py):
+   a negative control for "asks before assuming".
+4. [`toolsets.py`](agents/wms_assistant/toolsets.py) and
+   [`approval.py`](agents/wms_assistant/approval.py): how reads and writes are
+   separated, and how approval is requested.
 
 ## The problem
 
 A WMS assistant is useful when it can answer "which orders are stuck?" or
 "where is SKU X?" in seconds. It is dangerous when it answers confidently
-while wrong. Three examples:
+and is wrong:
 
 - "Martínez's order" matches four orders, and the assistant reports one of them.
-- "TDW-GLV" is not a SKU; the assistant reports the stock of the closest one.
+- "TDW-GLV" is not a SKU, and the assistant reports the stock of the closest match.
 - "Mark it shipped" gets written because the model sounded sure.
 
 `mcp-logistica` makes those mistakes impossible to *write*. This repository
-is about the layer above: an ADK agent whose configuration, instruction and
-approval flow push the model to **ask**, and whose tests prove the wiring.
+covers the layer above: an ADK agent whose configuration, instruction and
+approval flow push the model to **ask**, with tests that prove the wiring.
 
 ## Architecture
 
@@ -46,14 +72,15 @@ approval flow push the model to **ask**, and whose tests prove the wiring.
 flowchart LR
     U["User<br/>(adk web / adk run)"] --> A
     subgraph ADK["Google ADK process"]
-        A["LlmAgent wms_assistant<br/>instruction: ask before assuming<br/>temperature 0"]
+        A["LlmAgent wms_assistant<br/>instruction v2 · temperature 0"]
         M{{"Model<br/>Gemini (default)<br/>or LiteLlm: Claude / OpenAI"}}
-        C{{"Tool confirmation<br/>(writes only)"}}
+        CB["Callbacks<br/>telemetry (JSON logs)<br/>approval hint (writes)"]
         R["McpToolset: reads<br/>5 tools"]
-        W["McpToolset: writes<br/>2 tools, only if policy != off"]
+        W["McpToolset: writes<br/>2 tools, only if policy != off<br/>require_confirmation"]
         A <--> M
+        A --- CB
         A --> R
-        A --> C --> W
+        A --> W
     end
     subgraph P1["mcp-logistica (stdio)<br/>WMS_WRITE_MODE=off"]
         S1["FastMCP server"]
@@ -62,7 +89,7 @@ flowchart LR
         S2["FastMCP server"]
     end
     R -- "JSON-RPC over stdio" --> S1
-    W -- "JSON-RPC over stdio" --> S2
+    W -- "JSON-RPC over stdio<br/>after approval" --> S2
     subgraph DB["SQLite file"]
         T[("orders · order_lines<br/>stock_movements")]
         TR{{"triggers<br/>enum · column allowlist<br/>actor · append-only"}}
@@ -75,103 +102,88 @@ flowchart LR
 
 | Piece | File | What it does |
 |---|---|---|
-| Settings | [`agents/wms_assistant/config.py`](agents/wms_assistant/config.py) | Reads `WMS_*` variables. Unknown values abort with a clear error; nothing is guessed |
-| Instruction | [`agents/wms_assistant/prompts.py`](agents/wms_assistant/prompts.py) | Versioned system instruction (`adk-wms-assistant/v1`), with a read-only or write variant per policy |
-| Toolsets | [`agents/wms_assistant/toolsets.py`](agents/wms_assistant/toolsets.py) | Two `McpToolset`s, each with its own server process, tool filter and environment |
-| Agent | [`agents/wms_assistant/factory.py`](agents/wms_assistant/factory.py) | Builds the `LlmAgent`; picks Gemini or `LiteLlm` |
-| ADK entry point | [`agents/wms_assistant/agent.py`](agents/wms_assistant/agent.py) | `root_agent` for `adk web`, `adk run` and `adk eval` |
-| Eval cases | [`evals/`](evals/) | ADK eval set (`.test.json`) and metric configs |
+| Settings | [`config.py`](agents/wms_assistant/config.py) | Reads the `WMS_*` variables. Unknown backends, policies and timeouts, and a `provider/model` id on the Gemini backend, abort with a clear error |
+| Instruction | [`prompts.py`](agents/wms_assistant/prompts.py) | Versioned system instruction (`adk-wms-assistant/v2`, [changelog](PROMPT_CHANGELOG.md)), read-only or write variant |
+| Toolsets | [`toolsets.py`](agents/wms_assistant/toolsets.py) | Two `McpToolset`s, each with its own server process, tool filter and environment |
+| Approval | [`approval.py`](agents/wms_assistant/approval.py) | Requests confirmation for writes with the full call in the hint |
+| Telemetry | [`telemetry.py`](agents/wms_assistant/telemetry.py) | One JSON log line per tool call (duration, outcome) and per model response (tokens) |
+| Agent | [`factory.py`](agents/wms_assistant/factory.py) | Builds the `LlmAgent`; picks Gemini or `LiteLlm`; wires the callbacks |
+| Eval metrics | [`eval_metrics.py`](agents/wms_assistant/eval_metrics.py) | Two deterministic ADK custom metrics (no judge) |
+| Eval set | [`evals/`](evals/) | ADK eval set and metric configs |
 | Deployment guide | [`docs/deploy-vertex-agent-engine.md`](docs/deploy-vertex-agent-engine.md) | Vertex AI Agent Engine steps, **not executed** |
 
 The tools come from the server: `find_orders`, `get_order`,
 `list_stalled_orders`, `get_stock`, `get_audit_log` (reads) and
-`set_order_status`, `add_order_note` (writes). See the
-[`mcp-logistica` README](https://github.com/noelaliaga/mcp-logistica) for what
-each one does and which rules the database enforces.
+`set_order_status`, `add_order_note` (writes).
 
 ## Decisions
 
-**Why MCP instead of Python function tools.** ADK can turn any Python
-function into a tool, and that would have been less code here. The tools live
-behind MCP instead, because the same server is then used unchanged by:
+**MCP instead of Python function tools.** ADK can turn a Python function
+into a tool, and that would have meant less code here. The tools live behind
+MCP so that other clients can use the same server unchanged: this agent, any
+stdio MCP client, and the LiteLLM evaluation harnesses. The rules (closed
+status list, column allowlist, "a name never selects a write target", audit
+by trigger) are written and tested once, in the server and the database. The
+cost is a process boundary and a dependency on the server's tool names. A test
+lists the server's tools, so a new tool fails CI until someone decides whether
+the agent should get it.
 
-- this ADK agent (`McpToolset`);
-- Claude Code or any other stdio MCP client (`mcp-logistica` ships a
-  `.mcp.json` example; that client was not tested);
-- the LiteLLM-based evaluation harness in `mcp-logistica` and in the
-  companion repository [`wms-agent-evals`](https://github.com/noelaliaga/wms-agent-evals),
-  whose purpose is comparing several models on the same tools.
+**Two toolsets and two server processes, not one toolset plus a filter
+callback.** The read toolset always starts the server with
+`WMS_WRITE_MODE=off`, so even a wrong filter cannot write. The write toolset
+exists only when the policy allows writes. It keeps
+`require_confirmation=True`, so removing the approval callback falls back to
+ADK's generic prompt, never to an unconfirmed write. A `before_tool_callback`
+filter alone would put all the safety in one piece of Python.
 
-The rules (closed status list, column allowlist, "a name never selects a
-write target", audit by trigger) are written and tested once, in the server
-and the database, not once per agent framework. The cost is a process
-boundary: a child process per toolset, JSON-RPC serialization, and a
-dependency on the server's tool names. A test lists the server's tools, so a
-new tool fails CI until someone decides whether the agent should get it.
+**Approval shows the call.** ADK's `McpTool` asks with a generic text, and
+`adk run` prints only that text. `approval.py` requests the confirmation
+first, with a hint like:
 
-**Why two toolsets and two server processes.** The read toolset always
-starts the server with `WMS_WRITE_MODE=off`. Even if a tool filter were wrong,
-that process rejects every write. The write toolset exists only when the
-policy allows writes, and ADK asks the user to approve each call. The cost is
-one extra process. `McpToolset` applies `require_confirmation` to a whole
-toolset, so a separate toolset is also the cleanest way to confirm writes
-without confirming reads.
+```text
+Approve this write? set_order_status(order_ref='10432', reason='Only 1 unit of TDW-GLV-L at A-02-01; order needs 3', status='stock_issue'). Mode on: the change is committed and audited as 'agent'.
+```
 
-**Why human approval on top of the server's own checks.** The server stops
-invalid writes: an invented status, a name instead of an id, a shipped
-status. It cannot stop a *valid* write to the wrong order. Only the person
-who asked can. A test shows both layers working: the user approves marking an
-order `shipped`, and the server still refuses.
+A test checks that hint. The server stops invalid writes; only the person
+who asked can stop a *valid* write to the wrong order.
 
-**Why the server does not get the parent environment.** The MCP SDK passes a
-small safe set of variables (HOME, PATH, ...) plus whatever the toolset adds.
-The toolsets add only `WMS_DB_PATH`, `WMS_WRITE_MODE` and, when set,
-`PYTHONPATH`. Model API keys stay in the agent process. A test checks this.
+**Model keys never reach the server.** The MCP SDK passes a small safe set of
+variables (HOME, PATH, ...) plus what the toolset adds: `WMS_DB_PATH`,
+`WMS_WRITE_MODE` and, when set, `PYTHONPATH`. A test starts the real servers
+with a probe command and checks the environment they actually received.
 
-**Why Gemini by default and LiteLLM for the rest.** Gemini is ADK's native
-path. Claude and OpenAI go through ADK's `LiteLlm` wrapper, so switching
-provider is a configuration change, not a code change:
+**Telemetry without content.** Tool calls log name, argument *names*,
+duration and outcome (`ok`, `needs_clarification`, `dry_run`,
+`approval_requested`, `rejected`, `server_error`). Model responses log token
+counts and the number of tool calls. Every line carries the instruction
+version. Argument values and message text are not logged because they can
+contain customer names.
+
+**Gemini by default, LiteLLM for the rest.** Gemini is ADK's native path.
+Claude and OpenAI go through ADK's `LiteLlm` wrapper, so switching provider is
+a configuration change:
 
 ```bash
 WMS_MODEL_BACKEND=litellm WMS_MODEL=anthropic/<model-id> make run
 ```
 
-`WMS_MODEL` without a provider prefix is rejected for LiteLLM instead of being
-guessed. The default Gemini model is ADK's own default (`LlmAgent.DEFAULT_MODEL`),
-so it follows the installed ADK version.
+The default Gemini model is ADK's own (`LlmAgent.DEFAULT_MODEL`), so it
+follows the installed ADK version.
 
-**Why `mcp-logistica` is not a declared dependency.** It is not on PyPI.
-Declaring an unpublished name would let `pip` fetch a package with that name
-from the public index if the local copy were missing (dependency confusion).
-`make install` installs it explicitly from `MCP_LOGISTICA`, a local path or a
-git URL.
+**`mcp-logistica` is not a declared dependency.** It is not on PyPI, and
+declaring an unpublished name invites dependency confusion. `make install`
+installs it explicitly from `MCP_LOGISTICA` (a local path or a git URL).
 
-**Temperature 0.** Operational answers should not change between two runs of
-the same question. It does not make a model deterministic, but it removes one
-source of variation.
+**Temperature 0.** It removes one source of variation. It does not make a
+model deterministic, so comparing two instruction versions still needs
+several runs each.
 
-## Quickstart
-
-```bash
-# next to a checkout of mcp-logistica (default: ../mcp-logistica)
-make install PYTHON=python3.12   # .venv, mcp-logistica, this package, dev tools
-make seed                        # data/wms.sqlite with synthetic data
-make test                        # offline: scripted model, real MCP server, no network
-make lint                        # ruff + ruff format --check + mypy --strict
-```
-
-To install `mcp-logistica` from somewhere else:
-
-```bash
-make install MCP_LOGISTICA="git+https://github.com/<owner>/mcp-logistica@<ref>"
-```
-
-### Talk to it (needs your own model credentials)
+## Run it with a model (your own credentials)
 
 Copy [`.env.example`](.env.example) to `.env` or export the variables. Then:
 
 ```bash
-make web                      # ADK dev UI, writes off
+make web                      # ADK dev UI; writes off. Opens without keys, answers only with them
 make run POLICY=dry_run       # terminal chat; writes need approval and are rolled back
 make run POLICY=on            # writes need approval and are committed (audited as 'agent')
 ```
@@ -179,142 +191,149 @@ make run POLICY=on            # writes need approval and are committed (audited 
 | Variable | Default | Values |
 |---|---|---|
 | `WMS_MODEL_BACKEND` | `gemini` | `gemini`, `litellm` |
-| `WMS_MODEL` | ADK's default Gemini model | any Gemini id, or `provider/model` for LiteLLM |
+| `WMS_MODEL` | ADK's default Gemini model | a Gemini id, or `provider/model` for LiteLLM |
 | `WMS_WRITE_POLICY` | `off` | `off`, `dry_run`, `on` |
 | `WMS_DB_PATH` | `data/wms.sqlite` | a database created by `wms-seed`; a missing file stops the agent at import |
 | `WMS_MCP_COMMAND` | this Python with `-m wms_mcp.server` | any command that starts the server on stdio |
 | `WMS_MCP_TIMEOUT_S` | `30` | seconds, `(0, 600]` |
 
-These commands call a paid model API with your credentials. They were **not**
-run while building this repository.
+With `make`, `POLICY=...` and `DB=...` on the command line win over `.env`.
+Without them, `.env` or your shell decides.
 
-### Evaluate with ADK (needs your own model credentials)
+Telemetry lines go wherever ADK sends logs at its default INFO level. `adk web`
+prints them to the console. `adk run` writes them to the log file it names at
+startup.
 
-```bash
-make eval    # adk eval agents/wms_assistant evals/wms_assistant.test.json --config_file_path evals/test_config.json
-```
+These commands call a paid model API. They have **not** been run for this
+repository yet.
+
+## Evaluate
 
 [`evals/wms_assistant.test.json`](evals/wms_assistant.test.json) is an ADK eval
-set with seven cases, run with writes off:
+set with eight cases, run with writes off: stalled orders, stock per location,
+a partial SKU, an ambiguous customer name, the same name followed by the
+user's answer (two turns), a write request with writes disabled, an order
+note with a prompt injection, and an audit trail. Reference answers are
+hand-written against the seed data.
 
-- stalled orders over 48 hours;
-- stock per location;
-- a partial SKU, where the agent should ask;
-- an ambiguous customer name, where the agent should ask;
-- a write request while writes are disabled;
-- an order note that contains a prompt injection;
-- the audit trail of an order.
+Which metric covers which behaviour:
 
-Each case has a reference tool trajectory, a hand-written reference answer and
-case-specific rubrics. [`evals/test_config.json`](evals/test_config.json) uses:
+| Behaviour | Metric | Judge? |
+|---|---|---|
+| Calls the right tools with the right arguments, in order | `tool_trajectory_avg_score` (`IN_ORDER`) | no |
+| Calls no tool the reference does not call (an empty reference allows none; `IN_ORDER` passes it) | `no_tool_calls_beyond_reference` (custom) | no |
+| Asks when the reference asks | `asks_when_reference_asks` (custom, crude "?" check) | no |
+| After the user picks an id, acts on that id | trajectory on the two-turn case | no |
+| Wording close to the reference | `response_match_score` (ROUGE-1) | no |
+| Asks *instead of choosing*, no invented facts, ignores injected text | `rubric_based_final_response_quality_v1` | **yes** |
 
-- `tool_trajectory_avg_score` (`IN_ORDER`, threshold 1.0);
-- `response_match_score` (ROUGE-1, threshold 0.3);
-- `rubric_based_final_response_quality_v1`, with a Gemini judge, 3 samples and
-  threshold 0.8.
+Only the rubric judge can tell a good clarifying question from a bad one.
+The deterministic metrics catch the obvious failures cheaply.
 
-The thresholds are **starting points, not calibrated values**: no live run
-has been made. The trajectory metric also compares tool arguments exactly, so a
-model that calls `list_stalled_orders` without `min_hours=48` (the default)
-fails it while giving the right answer (`"ignore_args": true` in the criterion
-relaxes that). Read the detailed results before trusting a score.
+```bash
+make eval-offline   # replayed agent, deterministic metrics only, no keys
+make eval           # your model + Gemini judge, paid (procedure: docs/live-runs.md)
+```
 
-`make eval` calls the agent's model and the judge model with your
-credentials. **No live results are included in this repository.** For a
-side-by-side comparison of Gemini, Claude and OpenAI on the same tools, see
-[`wms-agent-evals`](https://github.com/noelaliaga/wms-agent-evals).
+- `make eval` needs **Google credentials for the judge** even when the agent
+  runs on Claude or OpenAI.
+- The judge is pinned in `evals/test_config.json` (`gemini-3.5-flash`). The
+  id has not been checked against the live API. A Gemini judge grading a
+  Gemini agent may favour its own family. [docs/live-runs.md](docs/live-runs.md)
+  explains how to change it and what to record.
+- The thresholds are starting points, not calibrated values. The trajectory
+  metric compares arguments exactly. A model that omits `min_hours=48` fails
+  it while giving the right answer.
+- A manual [`eval-live`](.github/workflows/eval-live.yml) workflow runs the
+  same command with repository secrets and uploads the log. It has not been
+  run.
+
+**No live results are included.** The companion repository
+[`wms-agent-evals`](https://github.com/noelaliaga/wms-agent-evals) is a
+harness for comparing models on the same tools. Its offline pipeline is
+tested, but it has no live results published yet.
 
 ## Tests
 
-All tests run offline. An autouse fixture makes any TCP/UDP connection from
-the test process fail, and the MCP servers are child processes that talk
-over pipes.
-
-The model is [`ScriptedLlm`](tests/fakes.py), a real `BaseLlm` subclass that
-returns scripted turns keyed by the user's message. ADK drives it exactly as
-it would drive Gemini: it builds the request (instruction, tool declarations,
-history) and executes the returned function calls through the real toolsets,
-the real `mcp-logistica` server and the real SQLite triggers. Only the model's
+The test process cannot open network connections or resolve names. The MCP
+servers are child processes on pipes. The model is
+[`ScriptedLlm`](tests/fakes.py), a real `BaseLlm` subclass that returns
+scripted turns. ADK builds the real request and runs the returned function
+calls through the real toolsets, server and SQLite triggers. Only the model's
 choices are fake.
 
 | File | What it checks |
 |---|---|
-| `test_config.py` | Defaults; LiteLLM needs a prefixed model; unknown backend, policy or timeout is rejected; the suite cannot open network connections |
-| `test_agent_build.py` | Gemini by default and `LiteLlm` when asked; temperature 0; the instruction and its read-only or write variant; one read toolset with writes off, plus a write toolset with `require_confirmation=True` otherwise; the read server always gets `WMS_WRITE_MODE=off`; model keys are not passed to servers; `root_agent` loads through the loaders `adk web`/`adk run` and `adk eval` use; a missing database stops the import |
-| `test_toolset_stdio.py` | `McpToolset` starts `mcp-logistica` over stdio and lists exactly the expected tools per policy; the server offers nothing unaccounted for; schemas come from the server (enum, `additionalProperties: false`) |
-| `test_agent_turns.py` | **One turn with a simulated tool call** (`get_stock`), checking the tool result and what ADK sent to the model; an ambiguous name comes back as candidates; a write **waits for approval** and changes nothing; a rejected write changes nothing; an approved write is applied and audited as `agent`; an approved dry run writes nothing; an approved `shipped` is still refused by the server |
-| `test_evalset.py` | The eval set and both configs validate against ADK's models; ADK's `AgentEvaluator` runs the whole set offline with a replay of the reference answers and passes; a negative control that skips the tools **fails** the trajectory metric |
-
-The offline evaluator test proves that the eval files, tool names, arguments
-and metric configuration work with ADK. It says nothing about how a real
-model scores.
+| `test_config.py` | Defaults; closed vocabularies; LiteLLM needs a prefixed id; a LiteLLM id on the Gemini backend is rejected; network and DNS are blocked |
+| `test_agent_build.py` | Model choice; temperature 0; instruction variant; toolsets, filters and `require_confirmation`; the read server always gets `WMS_WRITE_MODE=off`; `root_agent` loads through the `adk web`/`run`/`eval` loaders |
+| `test_server_env_end_to_end.py` | The real server processes receive no model keys (probe command) |
+| `test_toolset_stdio.py` | `McpToolset` starts the server over stdio and lists exactly the expected tools; schemas come from the server |
+| `test_agent_turns.py` | A read turn; an ambiguous name returns candidates; a write waits for approval, and the **hint shows the call**; rejected, approved, dry-run and forbidden (`shipped`) writes; **telemetry** lines and outcomes |
+| `test_litellm_turn.py` | A tool-call round trip through ADK's `LiteLlm` adapter with a stub client (OpenAI format): tool declarations, JSON-string arguments, tool result message |
+| `test_evalset.py` | Eval files validate; ADK's evaluator passes a replay; three negative controls fail the metric they target (no tools, guessing, extra tool calls) |
 
 ## Status
 
-**Tested locally** (macOS, 2026-09-16) with `google-adk` 2.9.1, `mcp` 1.30.0,
-`litellm` 1.85.7, ruff 0.16.8, mypy 2.3.1 and pytest 9.1.1:
+**Tested locally** on 2026-09-16 (macOS). Details and versions are in
+[docs/testing-notes.md](docs/testing-notes.md).
 
-- `ruff check`, `ruff format --check` and `mypy --strict` are clean (mypy on
-  Python 3.12);
-- `pytest`: 43 passed on each of Python 3.11.15, 3.12.14 and 3.13.15, in
-  about 17 seconds.
+- `pytest`: 52 passed on each of Python 3.11, 3.12, 3.13 and 3.14.
+- `ruff check`, `ruff format --check` and `mypy --strict` are clean.
+- `make eval-offline`: 8 of 8 cases pass.
+- The workflow files pass `actionlint` 1.7.12.
 
-**Configured but not yet run:** the GitHub Actions workflow
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml), Python 3.11–3.13). It
-checks out `mcp-logistica` next to this repository, which needs a read token
-secret while that repository is private.
+**Configured but never run:** GitHub Actions (`ci.yml`, Python 3.11–3.14,
+and the manual `eval-live.yml`). CI checks out `mcp-logistica` at a pinned
+commit and needs a read token while that repository is private.
 
 **Not done:**
 
-- **No run against a real model.** No test, no CI step and nothing during
-  development called Gemini, Claude or OpenAI. How well a real model follows
-  "ask before assuming" is **not measured** here. Run `make eval` with your
-  own keys.
-- **Not deployed.** [`docs/deploy-vertex-agent-engine.md`](docs/deploy-vertex-agent-engine.md)
-  describes the steps; none were executed, and two packaging details are
-  marked unverified.
-- `adk web` and `adk run` were not started, because both need model
-  credentials. The loader they use is tested.
+- **No run against a real model.** Nothing has called Gemini, Claude or
+  OpenAI, so how well a real model follows "ask before assuming" is **not
+  measured**. [docs/live-runs.md](docs/live-runs.md) is the procedure.
+- **Not deployed.** The [deployment guide](docs/deploy-vertex-agent-engine.md)
+  was written from the CLI's help and source. None of its steps were run.
+- `adk run` was not used with a model. `adk web` starts and lists the agent
+  without keys, but it cannot answer.
 
 ## Limitations
 
 - **The scripted model ignores tool results.** The offline tests check wiring
   and safety configuration, not reasoning.
+- **Provider schema acceptance is untested.** ADK sends MCP schemas as JSON
+  Schema (`anyOf`/`null`, `additionalProperties: false`), and LiteLLM
+  forwards them. Whether each provider accepts them, and whether chained
+  Gemini calls need anything extra, only a live run will show.
 - **Approval is only as good as the client.** ADK pauses and emits
-  `adk_request_confirmation`; the ADK dev UI shows it. A custom client has to
-  show it to a person too, or writes never happen.
-- **Approval is per call, not per value.** The user approves the call the
-  model proposed. A careless "yes" still writes a valid but wrong change. The
-  server's audit log shows what happened; it does not prevent it.
-- **stdio and SQLite.** Fine for a local assistant and a demo. A shared
-  deployment needs the MCP server as an authenticated HTTP service in front of
-  a real database (see the deployment guide).
-- **The eval set is small and synthetic** (seven cases, one turn each, writes
-  off). Write paths are covered by pytest and by `mcp-logistica`'s own
-  scenarios, not by the ADK eval set.
+  `adk_request_confirmation`. `adk web` and `adk run` show it; a custom
+  client must show it too, or writes never happen.
+- **Approval is per call.** A careless "yes" still writes a valid but wrong
+  change. The audit log records it; it does not prevent it.
+- **stdio and SQLite.** Fine for a local assistant. A shared deployment needs
+  the MCP server as an authenticated HTTP service in front of a real database.
+- **Small synthetic eval set** (eight cases, writes off). Write paths are
+  covered by pytest and by `mcp-logistica`'s own scenarios.
+- **Instruction not tuned against a model.** v2 changed the text after code
+  review, not after a measured failure ([changelog](PROMPT_CHANGELOG.md)).
 - **ADK moves fast.** `google-adk` is capped at `<2.10` and `mcp` at `<1.31`.
-  With 2.9.1, ADK's evaluator lists the tools once more after closing its
-  runners, and that call waits for the MCP timeout before reconnecting. The
-  evaluator tests use a 5-second timeout for that reason.
-- **Instruction text is not tuned.** It encodes the rules; it has not been
-  optimized against a model.
 
 ## Credits
 
 - [Google Agent Development Kit](https://github.com/google/adk-python)
   (Apache-2.0): agent runtime, `McpToolset`, `LiteLlm`, tool confirmation,
-  evaluation and the deployment CLI.
+  callbacks, evaluation and the deployment CLI.
 - [Model Context Protocol](https://modelcontextprotocol.io) and its
   [Python SDK](https://github.com/modelcontextprotocol/python-sdk) (MIT).
 - [LiteLLM](https://github.com/BerriAI/litellm) (MIT), optional, for Claude
   and OpenAI.
 - [`mcp-logistica`](https://github.com/noelaliaga/mcp-logistica): the MCP
-  server and the synthetic seed data this agent uses.
+  server and the synthetic seed data.
 - [pytest](https://pytest.org), [pytest-asyncio](https://github.com/pytest-dev/pytest-asyncio),
-  [Ruff](https://docs.astral.sh/ruff/) and [mypy](https://mypy-lang.org).
-- All companies, people, addresses and SKUs come from `mcp-logistica`'s seed
-  and are invented.
-- Written with heavy use of AI coding assistants (Claude Code). I own the
-  design and the constraints, and I verified them with the tests above.
+  [Ruff](https://docs.astral.sh/ruff/), [mypy](https://mypy-lang.org) and
+  [actionlint](https://github.com/rhysd/actionlint).
+- All companies, people, addresses and SKUs are invented.
+- Built with AI coding assistants (Claude Code). I defined the design, the
+  safety constraints and the test plan, and I reviewed every change and
+  checked it against the test suite.
 
 MIT licensed.
