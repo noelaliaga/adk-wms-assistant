@@ -56,19 +56,41 @@ def test_eval_set_covers_ask_before_assuming() -> None:
         "ambiguous_customer_asks_first",
         "write_request_with_writes_off",
         "injected_note_is_data",
+        "ambiguous_customer_then_order_id",
     } <= ids
 
 
-def test_live_config_uses_trajectory_response_and_rubric_metrics() -> None:
+def test_a_multi_turn_case_acts_on_the_id_the_user_gives() -> None:
+    [case] = [c for c in _eval_set().eval_cases if c.eval_id == "ambiguous_customer_then_order_id"]
+    assert case.conversation is not None
+    ask, act = case.conversation
+    assert "?" in "".join(p.text or "" for p in ask.final_response.parts or [])  # type: ignore[union-attr]
+    data = act.intermediate_data
+    assert data is not None
+    assert hasattr(data, "tool_uses")
+    assert [(t.name, t.args) for t in data.tool_uses] == [("get_order", {"order_ref": "10412"})]
+
+
+DETERMINISTIC = {
+    "tool_trajectory_avg_score",
+    "response_match_score",
+    "asks_when_reference_asks",
+    "no_tool_calls_beyond_reference",
+}
+
+
+def test_live_config_adds_only_the_judge_to_the_offline_metrics() -> None:
     live = _config("test_config.json")
-    assert set(live.criteria) == {
-        "tool_trajectory_avg_score",
-        "response_match_score",
-        "rubric_based_final_response_quality_v1",
-    }
+    assert set(live.criteria) == DETERMINISTIC | {"rubric_based_final_response_quality_v1"}
     # The offline config must not need a judge model (that would be a network call).
     offline = _config("offline_config.json")
-    assert set(offline.criteria) == {"tool_trajectory_avg_score", "response_match_score"}
+    assert set(offline.criteria) == DETERMINISTIC
+    for config in (live, offline):
+        assert config.custom_metrics is not None
+        assert set(config.custom_metrics) == DETERMINISTIC - {
+            "tool_trajectory_avg_score",
+            "response_match_score",
+        }
 
 
 @pytest.fixture
@@ -95,13 +117,38 @@ async def test_adk_evaluator_passes_a_replay_of_the_references(eval_env: None) -
     )
 
 
-async def test_adk_evaluator_fails_an_agent_that_skips_the_tools(eval_env: None) -> None:
-    """Negative control: same final text, no tool calls. The trajectory metric must fail."""
-    with pytest.raises(AssertionError, match="tool_trajectory_avg_score"):
+async def _failed_metrics(agent_module: str) -> str:
+    with pytest.raises(AssertionError) as failure:
         await AgentEvaluator.evaluate_eval_set(
-            agent_module="offline_agents.skip_tools",
+            agent_module=agent_module,
             eval_set=_eval_set(),
             eval_config=_config("offline_config.json"),
             num_runs=1,
             print_detailed_results=False,
         )
+    return str(failure.value)
+
+
+async def test_adk_evaluator_fails_an_agent_that_skips_the_tools(eval_env: None) -> None:
+    """Negative control: same final text, no tool calls. The trajectory metric must fail."""
+    message = await _failed_metrics("offline_agents.skip_tools")
+    assert "tool_trajectory_avg_score" in message
+
+
+async def test_adk_evaluator_fails_an_agent_that_guesses(eval_env: None) -> None:
+    """Negative control: same lookups, but it states an answer where it should ask."""
+    message = await _failed_metrics("offline_agents.guesses")
+    assert "asks_when_reference_asks" in message
+    assert "tool_trajectory_avg_score" not in message
+
+
+async def test_adk_evaluator_fails_an_agent_that_calls_tools_it_should_not(
+    eval_env: None,
+) -> None:
+    """Negative control: a lookup where the reference has none.
+
+    IN_ORDER passes it (an empty reference matches anything); the custom metric does not.
+    """
+    message = await _failed_metrics("offline_agents.extra_tools")
+    assert "no_tool_calls_beyond_reference" in message
+    assert "tool_trajectory_avg_score" not in message

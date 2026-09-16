@@ -1,3 +1,3 @@
-from offline_agents._build import build
+from offline_agents._build import Mode, build
 
-root_agent = build(with_tools=False)
+root_agent = build(Mode.SKIP_TOOLS)

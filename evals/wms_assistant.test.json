@@ -1,7 +1,7 @@
 {
   "eval_set_id": "wms_assistant_read_only",
   "name": "WMS assistant: read paths and ask-before-assuming",
-  "description": "Synthetic cases against the mcp-logistica seed database, run with WMS_WRITE_POLICY=off. Reference answers are hand-written, not recorded from a model.",
+  "description": "Synthetic cases against the mcp-logistica seed database, run with WMS_WRITE_POLICY=off. Reference answers are hand-written, not recorded from a model. One case has two turns (ask, then act on the id the user gives).",
   "eval_cases": [
     {
       "eval_id": "stalled_orders_48h",
@@ -226,6 +226,94 @@
           "rubric_id": "ambiguous_customer_asks_first-2",
           "rubric_content": {
             "text_property": "The response does not pick one of the orders on its own or report a single status as the answer."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    },
+    {
+      "eval_id": "ambiguous_customer_then_order_id",
+      "conversation": [
+        {
+          "invocation_id": "ambiguous_customer_then_order_id-1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "What's the status of Martínez's order?"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Four orders match Martínez: 10432 (Lucía Martínez, Valencia, picking), 10412 (Javier Martínez Soler, Zaragoza, allocated), 10409 (Carmen Martinez, Sevilla, pending) and 10401 (Lucía Martínez, Valencia, delivered). Which order id do you mean?"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_order",
+                "args": {
+                  "order_ref": "Martínez"
+                }
+              }
+            ],
+            "tool_responses": [],
+            "intermediate_responses": []
+          }
+        },
+        {
+          "invocation_id": "ambiguous_customer_then_order_id-2",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "10412."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Order 10412 (Javier Martínez Soler, Zaragoza) is allocated: 1 × PCO-TNT-2P."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_order",
+                "args": {
+                  "order_ref": "10412"
+                }
+              }
+            ],
+            "tool_responses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "wms_assistant",
+        "user_id": "eval-user",
+        "state": {}
+      },
+      "rubrics": [
+        {
+          "rubric_id": "ambiguous_customer_then_order_id-1",
+          "rubric_content": {
+            "text_property": "The final response reports order 10412 (Javier Martínez Soler, Zaragoza, allocated) and no other order as the answer."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        },
+        {
+          "rubric_id": "ambiguous_customer_then_order_id-2",
+          "rubric_content": {
+            "text_property": "The final response does not mention a status for orders 10432, 10409 or 10401."
           },
           "type": "FINAL_RESPONSE_QUALITY"
         }

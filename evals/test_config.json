@@ -29,6 +29,22 @@
           "type": "FINAL_RESPONSE_QUALITY"
         }
       ]
+    },
+    "asks_when_reference_asks": 1.0,
+    "no_tool_calls_beyond_reference": 1.0
+  },
+  "custom_metrics": {
+    "asks_when_reference_asks": {
+      "code_config": {
+        "name": "wms_assistant.eval_metrics.asks_when_reference_asks"
+      },
+      "description": "If the reference answer asks a question, the agent's answer must ask one too. Deterministic, no judge."
+    },
+    "no_tool_calls_beyond_reference": {
+      "code_config": {
+        "name": "wms_assistant.eval_metrics.no_tool_calls_beyond_reference"
+      },
+      "description": "Every tool the agent called appears in the reference trajectory; an empty reference allows no calls. Deterministic, no judge."
     }
   }
 }
