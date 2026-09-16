@@ -1,0 +1,30 @@
+# environments
+.venv*/
+venv/
+node_modules/
+.next/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+# tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+# CI checkout of the MCP server
+.deps/
+# local data and run output
+data/
+.adk/
+eval_results/
+*.sqlite
+*.sqlite-*
+logs/
+# secrets: never commit
+.env
+.env.*
+!.env.example
+.DS_Store
+# deployment staging (see docs/deploy-vertex-agent-engine.md)
+deploy/

@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adk-wms-assistant"
+version = "0.1.0"
+description = "A warehouse assistant built with Google ADK that uses the mcp-logistica MCP server over stdio, asks before assuming and keeps writes off by default."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Noel Aliaga" }]
+requires-python = ">=3.11"
+# mcp-logistica (the MCP server this agent drives) is deliberately NOT listed:
+# it is not published on PyPI, and declaring an unpublished name would let pip
+# resolve it from the public index if the local copy were missing (dependency
+# confusion). `make install` installs it explicitly from MCP_LOGISTICA.
+# Versions are capped at the minors the test suite ran against.
+dependencies = [
+    "google-adk[mcp]>=2.9.1,<2.10",
+    "mcp>=1.30,<1.31",
+]
+
+[project.optional-dependencies]
+# Claude / OpenAI (or any other LiteLLM provider) through ADK's LiteLlm wrapper.
+litellm = ["litellm>=1.84,<2"]
+# `adk eval` metrics (ROUGE, rubric-based judge).
+eval = ["google-adk[eval]>=2.9.1,<2.10"]
+dev = [
+    "adk-wms-assistant[litellm,eval]",
+    "mypy>=2.3,<2.4",
+    "pytest>=9.1,<10",
+    "pytest-asyncio>=1.4,<2",
+    "ruff>=0.16.7,<0.17",
+]
+
+[tool.setuptools.packages.find]
+where = ["agents"]
+
+[tool.setuptools.package-data]
+wms_assistant = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = [".deps"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S", "PT", "C4", "RET", "ASYNC"]
+ignore = ["S101"]  # asserts are fine in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["wms_assistant", "conftest", "fakes", "offline_agents"]
+
+[tool.mypy]
+# No python_version pin: some third-party stubs (numpy, pulled in by the eval
+# extra) use 3.12 syntax, so mypy checks against the interpreter it runs on.
+# CI runs it on 3.12.
+strict = true
+warn_unreachable = true
+files = ["agents", "tests"]
+mypy_path = ["agents", "tests"]
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra"
+filterwarnings = [
+    # ADK marks several features it enables by default as experimental.
+    "ignore:\\[EXPERIMENTAL\\]:UserWarning",
+]
