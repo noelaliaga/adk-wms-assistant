@@ -7,9 +7,10 @@ flow, the MCP toolsets, the stdio server and the SQLite triggers.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from collections.abc import AsyncIterator, Sequence
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from google.genai import types
 from conftest import SettingsFactory
 from fakes import ScriptedLlm, call, say
 from wms_assistant.factory import build_agent
+from wms_assistant.prompts import INSTRUCTION_VERSION
+from wms_assistant.telemetry import LOGGER_NAME
 from wms_assistant.toolsets import READ_TOOLS, WRITE_TOOLS
 
 APP = "wms_assistant_test"
@@ -72,6 +75,7 @@ class Harness:
     session: Session
 
 
+@asynccontextmanager
 async def _open(
     settings_env: dict[str, str],
     make_settings: SettingsFactory,
@@ -115,7 +119,7 @@ STOCK_SCRIPT = [
 
 
 async def test_one_turn_with_a_read_tool_call(make_settings: SettingsFactory) -> None:
-    async for h in _open({}, make_settings, {STOCK_QUESTION: STOCK_SCRIPT}):
+    async with _open({}, make_settings, {STOCK_QUESTION: STOCK_SCRIPT}) as h:
         turn = await h.session.say(STOCK_QUESTION)
 
         assert [c.name for c in turn.calls] == ["get_stock"]
@@ -146,7 +150,7 @@ async def test_ambiguous_name_comes_back_as_a_question_not_an_answer(
 ) -> None:
     question = "What's the status of Martínez's order?"
     script = [call("get_order", order_ref="Martínez"), say("Which order id do you mean?")]
-    async for h in _open({}, make_settings, {question: script}):
+    async with _open({}, make_settings, {question: script}) as h:
         turn = await h.session.say(question)
         payload = _payload(turn.responses[0])
         assert payload["outcome"] == "needs_clarification"
@@ -165,12 +169,18 @@ WRITE_SCRIPT = [
 ]
 
 
-def _pending_confirmation(turn: Turn) -> str:
+def _confirmation_request(turn: Turn) -> types.FunctionCall:
     [request] = [c for c in turn.calls if c.name == CONFIRMATION_TOOL]
     assert request.args is not None
     assert request.args["originalFunctionCall"]["name"] == "set_order_status"
     assert request.id is not None
-    return request.id
+    return request
+
+
+def _pending_confirmation(turn: Turn) -> str:
+    call_id = _confirmation_request(turn).id
+    assert call_id is not None
+    return call_id
 
 
 @pytest.mark.parametrize("policy", ["dry_run", "on"])
@@ -178,13 +188,21 @@ async def test_a_write_waits_for_user_approval(
     make_settings: SettingsFactory, db_path: Path, policy: str
 ) -> None:
     before = _order(db_path, 10432)
-    async for h in _open(
+    async with _open(
         {"WMS_WRITE_POLICY": policy}, make_settings, {WRITE_REQUEST: WRITE_SCRIPT}
-    ):
+    ) as h:
         turn = await h.session.say(WRITE_REQUEST)
-        _pending_confirmation(turn)
+        request = _confirmation_request(turn)
         [pending] = turn.responses
         assert "requires confirmation" in str(pending.response)
+        # What the person approving sees (adk run prints only this hint).
+        assert request.args is not None
+        hint = request.args["toolConfirmation"]["hint"]
+        assert "set_order_status(" in hint
+        assert "order_ref='10432'" in hint
+        assert "status='stock_issue'" in hint
+        assert "reason='Only 1 unit of TDW-GLV-L" in hint
+        assert f"Mode {policy}" in hint
         # The model was asked once; ADK paused instead of letting it continue.
         assert len(h.llm.requests) == 1
         assert sorted(h.llm.requests[0].tools_dict) == sorted(READ_TOOLS + WRITE_TOOLS)
@@ -195,7 +213,7 @@ async def test_a_rejected_write_changes_nothing(
     make_settings: SettingsFactory, db_path: Path
 ) -> None:
     before = _order(db_path, 10432)
-    async for h in _open({"WMS_WRITE_POLICY": "on"}, make_settings, {WRITE_REQUEST: WRITE_SCRIPT}):
+    async with _open({"WMS_WRITE_POLICY": "on"}, make_settings, {WRITE_REQUEST: WRITE_SCRIPT}) as h:
         call_id = _pending_confirmation(await h.session.say(WRITE_REQUEST))
         turn = await h.session.answer_confirmation(call_id, confirmed=False)
         [rejected] = turn.responses
@@ -208,7 +226,7 @@ async def test_an_approved_write_is_applied_and_audited_as_agent(
 ) -> None:
     status_before, audits_before = _order(db_path, 10432)
     assert status_before == "picking"
-    async for h in _open({"WMS_WRITE_POLICY": "on"}, make_settings, {WRITE_REQUEST: WRITE_SCRIPT}):
+    async with _open({"WMS_WRITE_POLICY": "on"}, make_settings, {WRITE_REQUEST: WRITE_SCRIPT}) as h:
         call_id = _pending_confirmation(await h.session.say(WRITE_REQUEST))
         turn = await h.session.answer_confirmation(call_id, confirmed=True)
         [applied] = turn.responses
@@ -224,9 +242,9 @@ async def test_an_approved_dry_run_writes_nothing(
     make_settings: SettingsFactory, db_path: Path
 ) -> None:
     before = _order(db_path, 10432)
-    async for h in _open(
+    async with _open(
         {"WMS_WRITE_POLICY": "dry_run"}, make_settings, {WRITE_REQUEST: WRITE_SCRIPT}
-    ):
+    ) as h:
         call_id = _pending_confirmation(await h.session.say(WRITE_REQUEST))
         turn = await h.session.answer_confirmation(call_id, confirmed=True)
         assert _payload(turn.responses[0])["outcome"] == "dry_run"
@@ -243,7 +261,7 @@ async def test_the_server_still_refuses_a_forbidden_status_after_approval(
         say("I can't mark it shipped."),
     ]
     before = _order(db_path, 10437)
-    async for h in _open({"WMS_WRITE_POLICY": "on"}, make_settings, {request: script}):
+    async with _open({"WMS_WRITE_POLICY": "on"}, make_settings, {request: script}) as h:
         call_id = _pending_confirmation(await h.session.say(request))
         turn = await h.session.answer_confirmation(call_id, confirmed=True)
         [refused] = turn.responses
@@ -251,3 +269,55 @@ async def test_the_server_still_refuses_a_forbidden_status_after_approval(
         assert refused.response.get("isError") is True
         assert "an agent cannot set status 'shipped'" in json.dumps(refused.response)
     assert _order(db_path, 10437) == before
+
+
+async def test_telemetry_logs_tools_tokens_and_instruction_version(
+    make_settings: SettingsFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    async with _open(
+        {"WMS_WRITE_POLICY": "on"},
+        make_settings,
+        {STOCK_QUESTION: STOCK_SCRIPT, WRITE_REQUEST: WRITE_SCRIPT},
+    ) as h:
+        await h.session.say(STOCK_QUESTION)
+        call_id = _pending_confirmation(await h.session.say(WRITE_REQUEST))
+        await h.session.answer_confirmation(call_id, confirmed=False)
+
+    records = [json.loads(r.getMessage()) for r in caplog.records if r.name == LOGGER_NAME]
+    assert records
+    assert {r["instruction_version"] for r in records} == {INSTRUCTION_VERSION}
+
+    tools = [r for r in records if r["event"] == "tool_call"]
+    assert [(r["tool"], r["outcome"]) for r in tools] == [
+        ("get_stock", "ok"),
+        ("set_order_status", "approval_requested"),
+        ("set_order_status", "rejected"),
+    ]
+    assert tools[0]["arg_names"] == ["sku"]
+    assert isinstance(tools[0]["duration_ms"], float)
+    assert tools[0]["duration_ms"] >= 0
+    # Values are not logged: they can carry customer data.
+    assert "TDW-GLV-L" not in caplog.text
+
+    models = [r for r in records if r["event"] == "model_response"]
+    # stock: call + answer; write: call (paused), then the answer after the rejection.
+    assert [m["tool_calls"] for m in models] == [1, 0, 1, 0]
+    assert all(m["model_version"] == "scripted" for m in models)
+    assert all(m["input_tokens"] >= 1 and m["output_tokens"] == 1 for m in models)
+
+
+async def test_telemetry_reports_the_server_outcome(
+    make_settings: SettingsFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    question = "What's the status of Martínez's order?"
+    script = [call("get_order", order_ref="Martínez"), say("Which order id do you mean?")]
+    async with _open({}, make_settings, {question: script}) as h:
+        await h.session.say(question)
+    outcomes = [
+        json.loads(r.getMessage())["outcome"]
+        for r in caplog.records
+        if r.name == LOGGER_NAME and '"tool_call"' in r.getMessage()
+    ]
+    assert outcomes == ["needs_clarification"]

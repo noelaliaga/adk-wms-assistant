@@ -8,6 +8,10 @@ come back through the real MCP toolsets.
 The script is keyed by the user's message. For each model turn after that
 message the next scripted ``Content`` is returned. The fake ignores tool
 results, so it tests the wiring and the safety configuration, not a model.
+
+Each response carries made-up usage numbers (input "tokens" = number of
+contents in the request, output = 1) so telemetry can be tested. They are not
+token counts.
 """
 
 from __future__ import annotations
@@ -69,4 +73,10 @@ class ScriptedLlm(BaseLlm):
             raise ScriptExhaustedError(f"no script for user message {user_text!r}")
         if step >= len(script):
             raise ScriptExhaustedError(f"script for {user_text!r} has no turn {step}")
-        yield LlmResponse(content=script[step])
+        yield LlmResponse(
+            content=script[step],
+            model_version=self.model,
+            usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=len(llm_request.contents), candidates_token_count=1
+            ),
+        )
