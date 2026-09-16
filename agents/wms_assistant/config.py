@@ -2,6 +2,8 @@
 
     WMS_MODEL_BACKEND   gemini (default) | litellm
     WMS_MODEL           model id. Default for gemini: ADK's default Gemini model.
+                        A "provider/model" id with the gemini backend is rejected
+                        (only Vertex "projects/..." resource names may contain "/").
                         Required for litellm, with a provider prefix, e.g.
                         "anthropic/<model>" or "openai/<model>".
     WMS_WRITE_POLICY    off (default) | dry_run | on
@@ -82,6 +84,13 @@ class Settings:
         model = env.get("WMS_MODEL", "").strip()
         if backend is ModelBackend.GEMINI:
             model = model or DEFAULT_GEMINI_MODEL
+            # "provider/model" is a LiteLLM id. Vertex resource names
+            # ("projects/.../models/...") are the only Gemini ids with a slash.
+            if "/" in model and not model.startswith("projects/"):
+                raise ConfigError(
+                    f"WMS_MODEL={model!r} looks like a LiteLLM id; set "
+                    "WMS_MODEL_BACKEND=litellm to use it, or give a Gemini model id"
+                )
         elif not model:
             raise ConfigError(
                 "WMS_MODEL_BACKEND=litellm needs WMS_MODEL with a provider prefix, "

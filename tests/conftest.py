@@ -23,10 +23,11 @@ class NetworkBlockedError(RuntimeError):
 
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail any in-process TCP/UDP connection: the suite must run offline.
+    """Fail any TCP/UDP connection or DNS lookup made by the test process.
 
     Unix sockets stay allowed (asyncio uses them internally). The MCP servers
-    are child processes that talk over pipes.
+    are child processes that talk over pipes; this guard does not reach into
+    them (they never get model keys, see test_server_env_end_to_end.py).
     """
     original_connect = socket.socket.connect
     original_connect_ex = socket.socket.connect_ex
@@ -43,6 +44,10 @@ def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
         refuse_inet(self, address)
         return original_connect_ex(self, address)
 
+    def no_dns(host: object, *args: Any, **kwargs: Any) -> Any:
+        raise NetworkBlockedError(f"DNS lookup attempted in a test: {host!r}")
+
+    monkeypatch.setattr(socket, "getaddrinfo", no_dns)
     monkeypatch.setattr(socket.socket, "connect", guarded)
     monkeypatch.setattr(socket.socket, "connect_ex", guarded_ex)
 

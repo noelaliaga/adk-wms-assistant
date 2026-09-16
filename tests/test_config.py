@@ -29,6 +29,11 @@ def test_gemini_model_can_be_overridden() -> None:
     assert settings.model == "gemini-some-other-model"
 
 
+def test_gemini_accepts_a_vertex_resource_name() -> None:
+    name = "projects/example-project/locations/europe-west1/publishers/google/models/some-model"
+    assert Settings.from_env({"WMS_MODEL": name}).model == name
+
+
 @pytest.mark.parametrize("model", ["anthropic/some-claude-model", "openai/some-gpt-model"])
 def test_litellm_backend_takes_a_prefixed_model(model: str) -> None:
     settings = Settings.from_env({"WMS_MODEL_BACKEND": "litellm", "WMS_MODEL": model})
@@ -46,6 +51,7 @@ def test_litellm_backend_takes_a_prefixed_model(model: str) -> None:
         ({"WMS_WRITE_POLICY": "true"}, "expected one of: off, dry_run, on"),
         ({"WMS_MCP_TIMEOUT_S": "0"}, "WMS_MCP_TIMEOUT_S='0' is not valid"),
         ({"WMS_MCP_TIMEOUT_S": "soon"}, "expected seconds"),
+        ({"WMS_MODEL": "anthropic/some-claude-model"}, "set WMS_MODEL_BACKEND=litellm"),
     ],
 )
 def test_unknown_values_are_rejected_not_guessed(env: dict[str, str], message: str) -> None:
@@ -72,3 +78,5 @@ def test_the_suite_cannot_open_network_connections() -> None:
 
     with socket.socket() as sock, pytest.raises(NetworkBlockedError):
         sock.connect(("192.0.2.1", 443))  # TEST-NET-1, never routed
+    with pytest.raises(NetworkBlockedError):
+        socket.getaddrinfo("example.com", 443)
