@@ -10,7 +10,7 @@ has no 1.85.7 build), ruff 0.16.8, mypy 2.3.1, pytest 9.1.1.
 `make install` and CI install with `-c constraints.txt`, so these versions are
 what a fresh install gets. Transitive dependencies are not pinned.
 
-`mcp-logistica` was at commit `6e9763d7ab50e01567ada3b27f772b32cef1328f`;
+`mcp-logistica` was at commit `c990ee3142a9789429b0b1e2d17062c0ff39421f`;
 CI checks out that commit.
 
 ## What "offline" means here

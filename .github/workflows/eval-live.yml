@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/mcp-logistica
-          ref: 6e9763d7ab50e01567ada3b27f772b32cef1328f
+          ref: c990ee3142a9789429b0b1e2d17062c0ff39421f
           path: .deps/mcp-logistica
           token: ${{ secrets.MCP_LOGISTICA_TOKEN || github.token }}
 
