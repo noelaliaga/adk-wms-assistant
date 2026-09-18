@@ -24,14 +24,11 @@ jobs:
 
       # The MCP server this agent drives lives in its own repository, pinned to
       # the commit the tests were run against. Bump the ref on purpose.
-      # While that repository is private, add a read-only fine-grained token as
-      # the MCP_LOGISTICA_TOKEN secret; once it is public the default token works.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/mcp-logistica
           ref: c990ee3142a9789429b0b1e2d17062c0ff39421f
           path: .deps/mcp-logistica
-          token: ${{ secrets.MCP_LOGISTICA_TOKEN || github.token }}
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

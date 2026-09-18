@@ -27,7 +27,7 @@ Python 3.11–3.14, `google-adk` 2.9, the official `mcp` SDK, `mypy --strict`,
 ## Try it in 60 seconds (no API keys)
 
 ```bash
-git clone https://github.com/noelaliaga/mcp-logistica ../mcp-logistica   # needs access while that repo is private
+git clone https://github.com/noelaliaga/mcp-logistica ../mcp-logistica
 make install        # python3 >= 3.11; or PYTHON=python3.12, or PYTHON="$(uv python find 3.12)"
 make seed           # data/wms.sqlite with synthetic orders and stock
 make test           # 52 tests: scripted model, real MCP server, no network
@@ -282,9 +282,10 @@ choices are fake.
 - `make eval-offline`: 8 of 8 cases pass.
 - The workflow files pass `actionlint` 1.7.12.
 
-**Configured but never run:** GitHub Actions (`ci.yml`, Python 3.11–3.14,
-and the manual `eval-live.yml`). CI checks out `mcp-logistica` at a pinned
-commit and needs a read token while that repository is private.
+**CI:** `ci.yml` runs on every push and passes: 52 tests on each of Python
+3.11 to 3.14, against the public `mcp-logistica` checked out at a pinned commit.
+
+**Configured but never run:** the manual `eval-live.yml`, which needs model API keys.
 
 **Not done:**
 
